@@ -1,8 +1,8 @@
 streamlit
 streamlit-audiorec
 requests
-openai>=0.27.0  
-openai-whisper
+openai==1.3.9
+openai-whisper==20231117
 ffmpeg
 boto3
 python-dotenv
