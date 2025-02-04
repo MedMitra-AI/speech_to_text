@@ -11,7 +11,8 @@ import concurrent.futures
 import uuid
 import boto3
 import io
-from pydub import AudioSegment
+import wave
+import audioop  # For pure-Python resampling/conversion
 
 # Load environment variables from .env
 load_dotenv()
@@ -54,8 +55,47 @@ DEPARTMENTS = [
 ]
 
 
+def raw_downsample_to_16k_mono(audio_bytes: bytes) -> bytes:
+    """
+    Reads a WAV from memory, converts it to 16-bit mono @ 16kHz, returns new WAV bytes in memory.
+    This uses only the built-in 'wave' and 'audioop' modules (no ffmpeg).
+    """
+    # Open the original WAV in memory
+    with wave.open(io.BytesIO(audio_bytes), "rb") as wf_in:
+        n_channels = wf_in.getnchannels()
+        sampwidth  = wf_in.getsampwidth()
+        framerate  = wf_in.getframerate()
+        n_frames   = wf_in.getnframes()
+        pcm_data   = wf_in.readframes(n_frames)
+
+    # Use audioop.ratecv to downsample from 'framerate' to 16000 Hz
+    new_rate = 16000
+    converted, _ = audioop.ratecv(
+        pcm_data,
+        sampwidth,
+        n_channels,
+        framerate,
+        new_rate,
+        None
+    )
+
+    # If stereo, convert to mono by averaging channels
+    if n_channels == 2:
+        converted = audioop.tomono(converted, sampwidth, 1, 1)
+
+    # Write the converted audio to a new WAV in memory
+    out_buf = io.BytesIO()
+    with wave.open(out_buf, "wb") as wf_out:
+        wf_out.setnchannels(1)            # mono
+        wf_out.setsampwidth(sampwidth)    # typically 2 bytes for 16-bit
+        wf_out.setframerate(new_rate)     # 16 kHz
+        wf_out.writeframes(converted)
+
+    return out_buf.getvalue()
+
+
 def upload_audio_to_s3(audio_bytes: bytes) -> str:
-    """Uploads audio to S3 and returns a public or presigned URL."""
+    """Uploads the in-memory audio bytes to S3 and returns a public or presigned URL."""
     if not AWS_S3_BUCKET_NAME:
         raise ValueError("Missing AWS_S3_BUCKET_NAME environment variable.")
 
@@ -96,30 +136,29 @@ def transcribe_deepgram(audio_bytes: bytes) -> str:
         st.error(f"Deepgram transcription error: {e}")
         return ""
 
+
 def transcribe_whisper(audio_bytes: bytes) -> str:
+    """Transcribe WAV bytes with OpenAI's Whisper API after downsampling to 16kHz mono."""
     if not OPENAI_API_KEY:
-        return ""
+        return "Missing OpenAI API key."
 
     openai.api_key = OPENAI_API_KEY
-
-    # Save the st_audiorec bytes
-    with open("temp_raw.wav", "wb") as f:
-        f.write(audio_bytes)
-
-    # Convert to standard 16k mono
-    sound = AudioSegment.from_wav("temp_raw.wav")
-    sound = sound.set_frame_rate(16000).set_channels(1)
-    sound.export("temp_audio.wav", format="wav")
-
-    # Send the newly converted file to Whisper
     try:
+        # 1) Downsample to 16k mono in memory
+        processed_wav = raw_downsample_to_16k_mono(audio_bytes)
+
+        # 2) Save the new WAV to a temp file
+        with open("temp_audio.wav", "wb") as f:
+            f.write(processed_wav)
+
+        # 3) Call Whisper
         with open("temp_audio.wav", "rb") as audio_file:
             transcript_data = openai.Audio.transcribe("whisper-1", audio_file)
+
         return transcript_data["text"].strip()
     except Exception as e:
         st.error(f"Whisper transcription error: {e}")
         return ""
-
 
 
 def transcribe_assemblyai(audio_bytes: bytes) -> str:
@@ -248,13 +287,11 @@ def save_transcripts_to_postgres(
 
 
 def main():
-    # Custom CSS adjustments:
-    # 1) Reduce margin-bottom for h1.
-    # 2) Reduce margin-top for .dept-label-custom.
+    # Custom CSS
     st.markdown("""
         <style>
         body {
-            background: #e6edf2; /* Soft background color */
+            background: #e6edf2;
         }
         .main .block-container {
             background-color: #fff;
@@ -262,17 +299,15 @@ def main():
             border-radius: 8px;
             box-shadow: 0 2px 5px rgba(0,0,0,0.05);
             max-width: 800px;
-            margin: 2rem auto; /* spacing around main container */
+            margin: 2rem auto;
         }
-        /* Slightly reduce space after the main title */
         h1 {
             margin-bottom: 1.2rem !important;
         }
-        /* Department label with smaller font, less top margin */
         .dept-label-custom {
             font-size: 0.9rem; 
             font-weight: 600;
-            margin-top: 0.5rem;   /* reduce top margin here */
+            margin-top: 0.5rem;
             margin-bottom: 0.25rem;
         }
         .instruction-box {
@@ -289,10 +324,9 @@ def main():
         </style>
     """, unsafe_allow_html=True)
 
-    # --- App Title ---
     st.title("Voice to Text Testing")
 
-    # --- Check for missing credentials ---
+    # Check for missing keys
     missing_keys = []
     if not DEEPGRAM_API_KEY:
         missing_keys.append("Deepgram")
@@ -302,7 +336,7 @@ def main():
         missing_keys.append("AssemblyAI")
 
     if missing_keys:
-        st.error(f"Missing API keys for: {', '.join(missing_keys)}. Check your .env file!")
+        st.error(f"Missing API keys for: {', '.join(missing_keys)}. Check your .env file or secrets!")
         return
 
     if not DATABASE_URL:
@@ -313,11 +347,11 @@ def main():
         st.error("Missing AWS credentials or bucket name.")
         return
 
-    # --- Department label (custom smaller font + reduced spacing) ---
+    # Department label + selection
     st.markdown("<p class='dept-label-custom'>Department</p>", unsafe_allow_html=True)
     selected_department = st.selectbox("", DEPARTMENTS)
 
-    # --- Instructions in a box ---
+    # Instructions
     st.markdown("""
     <div class='instruction-box'>
     <p><strong>Instructions:</strong> Click the microphone below, speak, and click again to stop. 
@@ -325,7 +359,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # --- Audio Recorder ---
+    # Audio Recorder
     audio_data = st_audiorec()
 
     # If the user recorded audio, show the length
@@ -336,7 +370,7 @@ def main():
 
     # If audio is available, proceed with upload + transcription
     if audio_data:
-        # 1) Upload audio
+        # Upload audio
         with st.spinner("Uploading audio to S3..."):
             try:
                 audio_url = upload_audio_to_s3(audio_data)
@@ -344,13 +378,13 @@ def main():
                 st.error(f"Error uploading to S3: {e}")
                 return
 
-        # 2) Transcribe
+        # Transcribe all in parallel
         with st.spinner("Transcribing..."):
             deepgram_text, whisper_text, assemblyai_text = transcribe_all_in_parallel(audio_data)
 
         st.success("Transcription completed!")
 
-        # --- Display transcripts in tabs ---
+        # Display transcripts in tabs
         st.subheader("Transcribed Results")
         tabs = st.tabs(["Deepgram", "Whisper", "AssemblyAI"])
         with tabs[0]:
@@ -360,11 +394,11 @@ def main():
         with tabs[2]:
             st.write(assemblyai_text if assemblyai_text else "_No transcript_")
 
-        # --- Choose best transcript ---
+        # Choose best transcript
         st.subheader("Choose the most accurate transcript")
         choice = st.radio("", ["Deepgram", "Whisper", "AssemblyAI"], index=0)
 
-        # --- Save to database ---
+        # Save to database
         if st.button("Save Transcript"):
             if not (deepgram_text.strip() or whisper_text.strip() or assemblyai_text.strip()):
                 st.warning("All transcripts are empty. Cannot save.")
