@@ -11,6 +11,7 @@ import concurrent.futures
 import uuid
 import boto3
 import io
+from pydub import AudioSegment
 
 # Load environment variables from .env
 load_dotenv()
@@ -95,24 +96,30 @@ def transcribe_deepgram(audio_bytes: bytes) -> str:
         st.error(f"Deepgram transcription error: {e}")
         return ""
 
-
 def transcribe_whisper(audio_bytes: bytes) -> str:
-    """Transcribe WAV bytes with OpenAI's Whisper API."""
     if not OPENAI_API_KEY:
-        return "Missing OpenAI API key."
+        return ""
 
     openai.api_key = OPENAI_API_KEY
-    try:
-        with open("temp_audio.wav", "wb") as f:
-            f.write(audio_bytes)
 
+    # Save the st_audiorec bytes
+    with open("temp_raw.wav", "wb") as f:
+        f.write(audio_bytes)
+
+    # Convert to standard 16k mono
+    sound = AudioSegment.from_wav("temp_raw.wav")
+    sound = sound.set_frame_rate(16000).set_channels(1)
+    sound.export("temp_audio.wav", format="wav")
+
+    # Send the newly converted file to Whisper
+    try:
         with open("temp_audio.wav", "rb") as audio_file:
             transcript_data = openai.Audio.transcribe("whisper-1", audio_file)
-
         return transcript_data["text"].strip()
     except Exception as e:
         st.error(f"Whisper transcription error: {e}")
         return ""
+
 
 
 def transcribe_assemblyai(audio_bytes: bytes) -> str:
