@@ -12,61 +12,22 @@ import uuid
 import boto3
 import io
 
-# Load environment variables from .env (if local)
+# Load environment variables from .env
 load_dotenv()
 
-# === DEBUG/INFO PRINTS FOR ENV VARIABLES ===
-# We'll show partial keys or indicate if they're None to diagnose missing secrets.
-def debug_print_env_vars():
-    dg_key = os.getenv("DEEPGRAM_API_KEY")
-    oa_key = os.getenv("OPENAI_API_KEY")
-    aa_key = os.getenv("ASSEMBLYAI_API_KEY")
-    db_url = os.getenv("DATABASE_URL")
+# API Keys
+DEEPGRAM_API_KEY     = os.getenv("DEEPGRAM_API_KEY")
+OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
+ASSEMBLYAI_API_KEY   = os.getenv("ASSEMBLYAI_API_KEY")
 
-    msg = []
-    if dg_key: 
-        msg.append(f"DEEPGRAM_API_KEY: DETECTED (length={len(dg_key)})")
-    else: 
-        msg.append("DEEPGRAM_API_KEY: NOT FOUND")
+# Single DATABASE_URL
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-    if oa_key: 
-        # show partial to confirm it's not empty
-        msg.append(f"OPENAI_API_KEY: DETECTED (starts with: {oa_key[:5] + '...' if len(oa_key) > 5 else oa_key})")
-    else: 
-        msg.append("OPENAI_API_KEY: NOT FOUND")
-
-    if aa_key: 
-        msg.append(f"ASSEMBLYAI_API_KEY: DETECTED (length={len(aa_key)})")
-    else: 
-        msg.append("ASSEMBLYAI_API_KEY: NOT FOUND")
-
-    if db_url:
-        msg.append("DATABASE_URL: DETECTED")
-    else:
-        msg.append("DATABASE_URL: NOT FOUND")
-
-    # AWS
-    aws_id  = os.getenv("AWS_ACCESS_KEY_ID")
-    aws_sec = os.getenv("AWS_SECRET_ACCESS_KEY")
-    aws_bkt = os.getenv("AWS_S3_BUCKET_NAME")
-
-    if aws_id and aws_sec and aws_bkt:
-        msg.append(f"AWS creds: DETECTED. Bucket={aws_bkt}")
-    else:
-        msg.append("AWS credentials or bucket NOT FOUND")
-
-    st.info(" | ".join(msg))
-
-
-# === Retrieve environment variables (after printing debug) ===
-DEEPGRAM_API_KEY   = os.getenv("DEEPGRAM_API_KEY")
-OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
-ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
-DATABASE_URL       = os.getenv("DATABASE_URL")
-AWS_ACCESS_KEY_ID  = os.getenv("AWS_ACCESS_KEY_ID")
+# AWS S3 Bucket info
+AWS_ACCESS_KEY_ID     = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME")
+AWS_DEFAULT_REGION    = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+AWS_S3_BUCKET_NAME    = os.getenv("AWS_S3_BUCKET_NAME")
 
 # Department options
 DEPARTMENTS = [
@@ -117,8 +78,7 @@ def upload_audio_to_s3(audio_bytes: bytes) -> str:
 def transcribe_deepgram(audio_bytes: bytes) -> str:
     """Transcribe WAV bytes with Deepgram's medical model (nova-2)."""
     if not DEEPGRAM_API_KEY:
-        st.warning("Deepgram API key is missing. Returning empty transcript.")
-        return ""
+        return "Missing Deepgram API key."
 
     url = "https://api.deepgram.com/v1/listen?model=nova-2-medical"
     headers = {
@@ -139,8 +99,7 @@ def transcribe_deepgram(audio_bytes: bytes) -> str:
 def transcribe_whisper(audio_bytes: bytes) -> str:
     """Transcribe WAV bytes with OpenAI's Whisper API."""
     if not OPENAI_API_KEY:
-        st.warning("OpenAI API key is missing. Returning empty transcript.")
-        return ""
+        return "Missing OpenAI API key."
 
     openai.api_key = OPENAI_API_KEY
     try:
@@ -149,9 +108,6 @@ def transcribe_whisper(audio_bytes: bytes) -> str:
 
         with open("temp_audio.wav", "rb") as audio_file:
             transcript_data = openai.Audio.transcribe("whisper-1", audio_file)
-
-        # Debug: see if the raw result is what we expect
-        st.write("DEBUG (Whisper raw response):", transcript_data)
 
         return transcript_data["text"].strip()
     except Exception as e:
@@ -168,8 +124,7 @@ def transcribe_assemblyai(audio_bytes: bytes) -> str:
     4) Return transcript
     """
     if not ASSEMBLYAI_API_KEY:
-        st.warning("AssemblyAI API key is missing. Returning empty transcript.")
-        return ""
+        return "Missing AssemblyAI API key."
 
     temp_file = "temp_assembly.wav"
     with open(temp_file, "wb") as f:
@@ -188,8 +143,7 @@ def transcribe_assemblyai(audio_bytes: bytes) -> str:
         return ""
 
     if "upload_url" not in upload_result:
-        st.error("AssemblyAI upload response invalid.")
-        return ""
+        return "AssemblyAI upload response invalid."
 
     audio_url = upload_result["upload_url"]
 
@@ -218,8 +172,7 @@ def transcribe_assemblyai(audio_bytes: bytes) -> str:
             status = status_data["status"]
 
             if status == "completed":
-                text = status_data["text"].strip()
-                return text
+                return status_data["text"].strip()
             elif status == "error":
                 st.error("AssemblyAI transcription error: " + status_data.get("error", "Unknown"))
                 return ""
@@ -231,10 +184,7 @@ def transcribe_assemblyai(audio_bytes: bytes) -> str:
 
 
 def transcribe_all_in_parallel(audio_bytes: bytes):
-    """
-    Runs the three transcription functions in parallel threads.
-    Returns a tuple: (deepgram_text, whisper_text, assemblyai_text)
-    """
+    """Runs the three transcription functions in parallel threads."""
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_deepgram   = executor.submit(transcribe_deepgram, audio_bytes)
         future_whisper    = executor.submit(transcribe_whisper, audio_bytes)
@@ -255,7 +205,7 @@ def save_transcripts_to_postgres(
     assemblyai_text: str,
     chosen_engine: str
 ):
-    """Inserts a record into the 'transcripts' table in Postgres."""
+    """Inserts a record into the 'transcripts' table."""
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
@@ -291,10 +241,9 @@ def save_transcripts_to_postgres(
 
 
 def main():
-    # === Debug: Print environment variable statuses ===
-    debug_print_env_vars()
-
-    # === Minimal CSS for style ===
+    # Custom CSS adjustments:
+    # 1) Reduce margin-bottom for h1.
+    # 2) Reduce margin-top for .dept-label-custom.
     st.markdown("""
         <style>
         body {
@@ -306,15 +255,17 @@ def main():
             border-radius: 8px;
             box-shadow: 0 2px 5px rgba(0,0,0,0.05);
             max-width: 800px;
-            margin: 2rem auto;
+            margin: 2rem auto; /* spacing around main container */
         }
+        /* Slightly reduce space after the main title */
         h1 {
             margin-bottom: 1.2rem !important;
         }
+        /* Department label with smaller font, less top margin */
         .dept-label-custom {
             font-size: 0.9rem; 
             font-weight: 600;
-            margin-top: 0.5rem; 
+            margin-top: 0.5rem;   /* reduce top margin here */
             margin-bottom: 0.25rem;
         }
         .instruction-box {
@@ -331,9 +282,10 @@ def main():
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("Voice to Text Testing (Debug Version)")
+    # --- App Title ---
+    st.title("Voice to Text Testing")
 
-    # === Check if critical env vars are missing (again) ===
+    # --- Check for missing credentials ---
     missing_keys = []
     if not DEEPGRAM_API_KEY:
         missing_keys.append("Deepgram")
@@ -343,7 +295,7 @@ def main():
         missing_keys.append("AssemblyAI")
 
     if missing_keys:
-        st.error(f"Missing API keys for: {', '.join(missing_keys)}. Please fix secrets or environment variables.")
+        st.error(f"Missing API keys for: {', '.join(missing_keys)}. Check your .env file!")
         return
 
     if not DATABASE_URL:
@@ -354,10 +306,11 @@ def main():
         st.error("Missing AWS credentials or bucket name.")
         return
 
-    # === UI: Department label + instructions ===
+    # --- Department label (custom smaller font + reduced spacing) ---
     st.markdown("<p class='dept-label-custom'>Department</p>", unsafe_allow_html=True)
     selected_department = st.selectbox("", DEPARTMENTS)
 
+    # --- Instructions in a box ---
     st.markdown("""
     <div class='instruction-box'>
     <p><strong>Instructions:</strong> Click the microphone below, speak, and click again to stop. 
@@ -365,7 +318,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # === Audio Recorder ===
+    # --- Audio Recorder ---
     audio_data = st_audiorec()
 
     # If the user recorded audio, show the length
@@ -374,7 +327,7 @@ def main():
     else:
         st.info("No audio recorded yet. Please click the microphone to record.")
 
-    # === If audio is available, proceed with upload + transcription ===
+    # If audio is available, proceed with upload + transcription
     if audio_data:
         # 1) Upload audio
         with st.spinner("Uploading audio to S3..."):
@@ -384,18 +337,13 @@ def main():
                 st.error(f"Error uploading to S3: {e}")
                 return
 
-        # 2) Transcribe in parallel
+        # 2) Transcribe
         with st.spinner("Transcribing..."):
             deepgram_text, whisper_text, assemblyai_text = transcribe_all_in_parallel(audio_data)
 
-        # Debug: show raw transcripts
-        st.write("DEBUG: Deepgram transcript:", deepgram_text)
-        st.write("DEBUG: Whisper transcript:", whisper_text)
-        st.write("DEBUG: AssemblyAI transcript:", assemblyai_text)
-
         st.success("Transcription completed!")
 
-        # 3) Display transcripts in tabs
+        # --- Display transcripts in tabs ---
         st.subheader("Transcribed Results")
         tabs = st.tabs(["Deepgram", "Whisper", "AssemblyAI"])
         with tabs[0]:
@@ -405,13 +353,12 @@ def main():
         with tabs[2]:
             st.write(assemblyai_text if assemblyai_text else "_No transcript_")
 
-        # 4) Let user choose best transcript
+        # --- Choose best transcript ---
         st.subheader("Choose the most accurate transcript")
         choice = st.radio("", ["Deepgram", "Whisper", "AssemblyAI"], index=0)
 
-        # 5) Save to database
+        # --- Save to database ---
         if st.button("Save Transcript"):
-            # Ensure at least one transcript has content
             if not (deepgram_text.strip() or whisper_text.strip() or assemblyai_text.strip()):
                 st.warning("All transcripts are empty. Cannot save.")
             else:
