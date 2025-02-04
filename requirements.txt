@@ -9,4 +9,4 @@ python-dotenv
 # Use one of the following. psycopg2-binary is often simpler for quick setups, 
 # but is not recommended for production. If you prefer the standard package, 
 # replace 'psycopg2-binary' with 'psycopg2'.
-psycopg2
+psycopg2-binary
