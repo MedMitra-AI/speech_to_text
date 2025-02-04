@@ -1,6 +1,7 @@
 streamlit
 streamlit-audiorec
 requests
+openai
 openai-whisper
 boto3
 python-dotenv
