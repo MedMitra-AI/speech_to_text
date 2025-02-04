@@ -12,7 +12,8 @@ import uuid
 import boto3
 import io
 import wave
-import audioop  # For pure-Python resampling/conversion
+import audioop  # for potential resampling if needed
+import struct
 
 # Load environment variables from .env
 load_dotenv()
@@ -55,47 +56,30 @@ DEPARTMENTS = [
 ]
 
 
-def raw_downsample_to_16k_mono(audio_bytes: bytes) -> bytes:
+def debug_wav_info(audio_bytes: bytes):
     """
-    Reads a WAV from memory, converts it to 16-bit mono @ 16kHz, returns new WAV bytes in memory.
-    This uses only the built-in 'wave' and 'audioop' modules (no ffmpeg).
+    Print out wave parameters to see if it's float or int, how many channels, etc.
+    This helps diagnose if st_audiorec is producing 16-bit PCM or 32-bit float.
     """
-    # Open the original WAV in memory
-    with wave.open(io.BytesIO(audio_bytes), "rb") as wf_in:
-        n_channels = wf_in.getnchannels()
-        sampwidth  = wf_in.getsampwidth()
-        framerate  = wf_in.getframerate()
-        n_frames   = wf_in.getnframes()
-        pcm_data   = wf_in.readframes(n_frames)
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+            n_channels = wf.getnchannels()
+            sampwidth  = wf.getsampwidth()  # e.g. 2 => 16-bit int, 4 => could be 32-bit float or 32-bit int
+            framerate  = wf.getframerate()
+            n_frames   = wf.getnframes()
+    except Exception as e:
+        st.write(f"Could not parse WAV header: {e}")
+        return
 
-    # Use audioop.ratecv to downsample from 'framerate' to 16000 Hz
-    new_rate = 16000
-    converted, _ = audioop.ratecv(
-        pcm_data,
-        sampwidth,
-        n_channels,
-        framerate,
-        new_rate,
-        None
-    )
+    st.write(f"DEBUG WAV: channels={n_channels}, sampwidth={sampwidth} bytes, framerate={framerate}, frames={n_frames}")
 
-    # If stereo, convert to mono by averaging channels
-    if n_channels == 2:
-        converted = audioop.tomono(converted, sampwidth, 1, 1)
-
-    # Write the converted audio to a new WAV in memory
-    out_buf = io.BytesIO()
-    with wave.open(out_buf, "wb") as wf_out:
-        wf_out.setnchannels(1)            # mono
-        wf_out.setsampwidth(sampwidth)    # typically 2 bytes for 16-bit
-        wf_out.setframerate(new_rate)     # 16 kHz
-        wf_out.writeframes(converted)
-
-    return out_buf.getvalue()
+    # Peek at the first 20 bytes (optional)
+    first_20 = audio_bytes[0:20]
+    st.write(f"DEBUG WAV first 20 bytes: {first_20}")
 
 
 def upload_audio_to_s3(audio_bytes: bytes) -> str:
-    """Uploads the in-memory audio bytes to S3 and returns a public or presigned URL."""
+    """Uploads audio to S3 and returns a public or presigned URL."""
     if not AWS_S3_BUCKET_NAME:
         raise ValueError("Missing AWS_S3_BUCKET_NAME environment variable.")
 
@@ -138,20 +122,15 @@ def transcribe_deepgram(audio_bytes: bytes) -> str:
 
 
 def transcribe_whisper(audio_bytes: bytes) -> str:
-    """Transcribe WAV bytes with OpenAI's Whisper API after downsampling to 16kHz mono."""
+    """Transcribe WAV bytes with OpenAI's Whisper API."""
     if not OPENAI_API_KEY:
         return "Missing OpenAI API key."
 
     openai.api_key = OPENAI_API_KEY
     try:
-        # 1) Downsample to 16k mono in memory
-        processed_wav = raw_downsample_to_16k_mono(audio_bytes)
-
-        # 2) Save the new WAV to a temp file
         with open("temp_audio.wav", "wb") as f:
-            f.write(processed_wav)
+            f.write(audio_bytes)
 
-        # 3) Call Whisper
         with open("temp_audio.wav", "rb") as audio_file:
             transcript_data = openai.Audio.transcribe("whisper-1", audio_file)
 
@@ -287,11 +266,11 @@ def save_transcripts_to_postgres(
 
 
 def main():
-    # Custom CSS
+    # Custom CSS adjustments:
     st.markdown("""
         <style>
         body {
-            background: #e6edf2;
+            background: #e6edf2; /* Soft background color */
         }
         .main .block-container {
             background-color: #fff;
@@ -326,7 +305,7 @@ def main():
 
     st.title("Voice to Text Testing")
 
-    # Check for missing keys
+    # Check for missing credentials
     missing_keys = []
     if not DEEPGRAM_API_KEY:
         missing_keys.append("Deepgram")
@@ -336,7 +315,7 @@ def main():
         missing_keys.append("AssemblyAI")
 
     if missing_keys:
-        st.error(f"Missing API keys for: {', '.join(missing_keys)}. Check your .env file or secrets!")
+        st.error(f"Missing API keys for: {', '.join(missing_keys)}. Check your secrets!")
         return
 
     if not DATABASE_URL:
@@ -362,15 +341,16 @@ def main():
     # Audio Recorder
     audio_data = st_audiorec()
 
-    # If the user recorded audio, show the length
+    # If we have audio, show length + debug info
     if audio_data:
         st.write(f"Received {len(audio_data)} bytes of audio data.")
+        # === NEW: Debug WAV info ===
+        debug_wav_info(audio_data)
     else:
         st.info("No audio recorded yet. Please click the microphone to record.")
 
-    # If audio is available, proceed with upload + transcription
     if audio_data:
-        # Upload audio
+        # 1) Upload audio
         with st.spinner("Uploading audio to S3..."):
             try:
                 audio_url = upload_audio_to_s3(audio_data)
@@ -378,7 +358,7 @@ def main():
                 st.error(f"Error uploading to S3: {e}")
                 return
 
-        # Transcribe all in parallel
+        # 2) Transcribe
         with st.spinner("Transcribing..."):
             deepgram_text, whisper_text, assemblyai_text = transcribe_all_in_parallel(audio_data)
 
