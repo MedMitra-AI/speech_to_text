@@ -1,6 +1,5 @@
 streamlit
 streamlit-audiorec
-openai-whisper==20231117
 ffmpeg
 python-dotenv
 torch
