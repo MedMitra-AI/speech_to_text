@@ -2,7 +2,7 @@ streamlit
 streamlit-audiorec
 requests
 openai>=0.27.0  
-openai-whisper
+git+https://github.com/openai/whisper.git
 boto3
 python-dotenv
-psycopg2-binary
+psycopg2
